@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Solar Cradle</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Unbounded:wght@500;600&display=swap">
+<style>
+  /* Layout: a full-bleed night-sky stage with a slim instrument strip at the top and a control row at the bottom. */
+  :root {
+    --space: #02030a;          /* deep space background */
+    --ink: #e8ecf7;            /* primary text */
+    --ink-dim: #8d96b3;        /* secondary text */
+    --panel: rgba(10, 13, 28, 0.62);
+    --line: rgba(160, 175, 220, 0.22);
+    --fire: #ff9a3c;           /* the one accent: explosion orange */
+    --font-display: "Unbounded", "Trebuchet MS", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--space);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    overflow: hidden;
+    position: relative;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage { position: absolute; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #stage canvas.dragging { cursor: grabbing; }
+
+  .hud { position: absolute; left: 0; right: 0; padding-inline: 16px; pointer-events: none; display: flex; gap: 12px; }
+  .hud-top { top: 14px; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; }
+  .hud-bottom { bottom: 14px; justify-content: center; flex-direction: column; align-items: center; }
+
+  h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: clamp(16px, 2.6vw, 22px);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    text-wrap: balance;
+  }
+  .sub { margin: 4px 0 0; color: var(--ink-dim); letter-spacing: 0.02em; }
+
+  .readout {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 12px;
+    min-width: 0;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    font-variant-numeric: tabular-nums;
+  }
+  .readout .label { color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.12em; font-size: 10px; }
+  .readout .value { margin-top: 3px; min-height: 1.3em; }
+  .readout .value b { color: var(--fire); font-weight: 500; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; pointer-events: auto; }
+  button {
+    font: inherit;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 9px 14px;
+    min-height: 40px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  button:hover { border-color: var(--fire); }
+  button:active { transform: translateY(1px); }
+  button:focus-visible { outline: 2px solid var(--fire); outline-offset: 2px; }
+  button[aria-pressed="false"] { color: var(--ink-dim); }
+  .tip { color: var(--ink-dim); text-align: center; text-wrap: balance; max-width: 60ch; }
+  .tip kbd { font: inherit; color: var(--ink); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+
+  #fallback { position: absolute; inset: 0; display: none; place-items: center; padding: 24px; text-align: center; color: var(--ink-dim); }
+
+  @media (max-width: 560px) {
+    .hud-top { flex-direction: column; }
+    .readout { align-self: stretch; }
+    .tip { display: none; }
+  }
+</style>
+
+
+</head>
+<body>
+<div id="stage" role="img" aria-label="A Newton's cradle whose eight balls are the planets of the solar system. Planets explode when they collide."></div>
+
+<div class="hud hud-top">
+  <div>
+    <h1>Solar Cradle</h1>
+    <p class="sub">Mercury to Neptune, on strings</p>
+  </div>
+  <div class="readout" aria-live="polite">
+    <div class="label">Last impact</div>
+    <div class="value" id="impact">Waiting for the first collision</div>
+  </div>
+</div>
+
+<div class="hud hud-bottom">
+  <div class="tip">Drag a planet sideways and let go. Keys <kbd>1</kbd>–<kbd>4</kbd> lift that many planets, <kbd>R</kbd> resets.</div>
+  <div class="controls">
+    <button type="button" data-lift="1">Lift 1</button>
+    <button type="button" data-lift="2">Lift 2</button>
+    <button type="button" data-lift="3">Lift 3</button>
+    <button type="button" data-lift="4">Lift 4</button>
+    <button type="button" id="reset">Reset</button>
+    <button type="button" id="sound" aria-pressed="true">Sound on</button>
+  </div>
+</div>
+
+<div id="fallback">This page needs WebGL, which your browser has turned off.</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  if (typeof THREE === "undefined") {
+    document.getElementById("fallback").style.display = "grid";
+    document.getElementById("fallback").textContent = "Three.js could not be loaded. Check your connection and reload.";
+    return;
+  }
+
+  // ------------------------------------------------------------ settings
+  var PLANETS = 8;
+  var BALL_R = 0.5;
+  var STRING_LEN = 3.2;
+  var FRAME_DEPTH = 0.9;
+  var GRAVITY = 15;
+  var DAMPING = 0.03;
+  var RESTITUTION = 0.999;
+  var MAX_DRAG = 70 * Math.PI / 180;
+  var START_LIFTED = 1;
+  var START_ANGLE = 50 * Math.PI / 180;
+  var MIN_IMPACT = 1;
+  var EXPLOSION_SIZE = 1;
+  var CAMERA_SHAKE = 0.15;
+  var STEP = 1 / 480;
+  var HIT_COOLDOWN = 0.15;
+
+  var NAMES = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"];
+  var TINT = [
+    [0.62, 0.60, 0.58], [0.90, 0.75, 0.45], [0.20, 0.45, 0.85], [0.80, 0.35, 0.20],
+    [0.85, 0.65, 0.50], [0.92, 0.80, 0.55], [0.60, 0.85, 0.90], [0.25, 0.35, 0.90]
+  ];
+
+  var spacing = BALL_R * 2;
+  var pivotY = STRING_LEN + BALL_R + 0.5;
+  var k = GRAVITY / STRING_LEN;
+
+  // ------------------------------------------------------------ renderer
+  var stage = document.getElementById("stage");
+  var renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  } catch (e) {
+    var fb = document.getElementById("fallback");
+    fb.style.display = "grid";
+    return;
+  }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.setClearColor(0x02030a, 1);
+  stage.appendChild(renderer.domElement);
+  var canvas = renderer.domElement;
+
+  var scene = new THREE.Scene();
+  var FOV = 40;
+  var camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 400);
+  var target = new THREE.Vector3(0, pivotY * 0.45, 0);
+  var camDir = new THREE.Vector3(0.35, 0.15, 0.9).normalize();
+  var camBase = new THREE.Vector3();
+  var shake = 0;
+  var shakeOffset = new THREE.Vector3();
+
+  // ------------------------------------------------------------ lights
+  scene.add(new THREE.AmbientLight(0x2a3250, 1.0));
+  var sunLight = new THREE.DirectionalLight(0xfff0dc, 1.5);
+  sunLight.position.set(-30, 18, 24);
+  scene.add(sunLight);
+  var rimLight = new THREE.DirectionalLight(0x6d86ff, 0.5);
+  rimLight.position.set(25, 6, -20);
+  scene.add(rimLight);
+  var flashLight = new THREE.PointLight(0xffb266, 0, 16, 1.6);
+  scene.add(flashLight);
+  var flashPower = 0;
+
+  // ------------------------------------------------------------ procedural planet textures
+  function hash3(x, y, z) {
+    var h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(z, 1274126177)) | 0;
+    h = Math.imul(h ^ (h >> 13), 1103515245);
+    h ^= h >>> 16;
+    return (h & 0xffff) / 65535;
+  }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+  function smooth(a, b, x) { var t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); }
+  function mix(c1, c2, t) { return [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)]; }
+
+  function noise3(x, y, z) {
+    var xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    var xf = x - xi, yf = y - yi, zf = z - zi;
+    xf = xf * xf * (3 - 2 * xf); yf = yf * yf * (3 - 2 * yf); zf = zf * zf * (3 - 2 * zf);
+    var c000 = hash3(xi, yi, zi), c100 = hash3(xi + 1, yi, zi);
+    var c010 = hash3(xi, yi + 1, zi), c110 = hash3(xi + 1, yi + 1, zi);
+    var c001 = hash3(xi, yi, zi + 1), c101 = hash3(xi + 1, yi, zi + 1);
+    var c011 = hash3(xi, yi + 1, zi + 1), c111 = hash3(xi + 1, yi + 1, zi + 1);
+    var x00 = lerp(c000, c100, xf), x10 = lerp(c010, c110, xf);
+    var x01 = lerp(c001, c101, xf), x11 = lerp(c011, c111, xf);
+    return lerp(lerp(x00, x10, yf), lerp(x01, x11, yf), zf);
+  }
+  function fbm(x, y, z, oct) {
+    var sum = 0, amp = 0.5, norm = 0;
+    for (var i = 0; i < oct; i++) {
+      sum += amp * noise3(x, y, z); norm += amp;
+      x *= 2.03; y *= 2.03; z *= 2.03; amp *= 0.5;
+    }
+    return sum / norm;
+  }
+
+  function planetPixel(idx, px, py, pz) {
+    var n = fbm(px * 3, py * 3, pz * 3, 4);
+    var detail = fbm(px * 9 + 7, py * 9 + 3, pz * 9 + 1, 3);
+    var c;
+    switch (idx) {
+      case 0: {
+        var g = clamp01(0.42 + (n - 0.5) * 0.9 + (detail - 0.5) * 0.5);
+        return [g, g * 0.97, g * 0.93];
+      }
+      case 1: {
+        var b = fbm(px * 2, py * 6, pz * 2, 4);
+        return mix([0.85, 0.62, 0.32], [0.98, 0.9, 0.65], b);
+      }
+      case 2: {
+        var h = fbm(px * 2.2 + 3, py * 2.2 + 1, pz * 2.2 + 5, 5);
+        if (h > 0.52) c = mix([0.16, 0.46, 0.18], [0.55, 0.45, 0.28], fbm(px * 6, py * 6, pz * 6, 3));
+        else c = mix([0.03, 0.12, 0.45], [0.08, 0.32, 0.72], clamp01(h * 1.6));
+        var cloud = smooth(0.55, 0.75, fbm(px * 3.5 + 11, py * 3.5 + 2, pz * 3.5 + 8, 4));
+        c = mix(c, [1, 1, 1], cloud * 0.85);
+        return mix(c, [1, 1, 1], smooth(0.82, 0.93, Math.abs(py)));
+      }
+      case 3: {
+        var tt = clamp01((n - 0.5) * 2.2 + 0.5);
+        c = mix([0.78, 0.33, 0.17], [0.48, 0.17, 0.09], tt);
+        c = mix(c, [0.92, 0.62, 0.42], detail * 0.25);
+        return mix(c, [0.95, 0.95, 0.95], smooth(0.9, 0.97, Math.abs(py)));
+      }
+      case 4: {
+        var s = py * 11 + (n - 0.5) * 2.2;
+        var band = 0.5 + 0.5 * Math.sin(s);
+        c = mix([0.52, 0.34, 0.22], [0.93, 0.84, 0.7], band);
+        c = mix(c, [0.7, 0.5, 0.35], clamp01((detail - 0.5) * 0.6 + 0.1));
+        var sx = Math.cos(-0.3) * Math.cos(1), sy = Math.sin(-0.3), sz = Math.cos(-0.3) * Math.sin(1);
+        var d = Math.sqrt((px - sx) * (px - sx) + (py - sy) * (py - sy) + (pz - sz) * (pz - sz));
+        return mix(c, [0.75, 0.3, 0.18], 1 - smooth(0.12, 0.25, d));
+      }
+      case 5: {
+        var s5 = py * 14 + (n - 0.5) * 1.2;
+        return mix([0.78, 0.66, 0.42], [0.95, 0.87, 0.65], 0.5 + 0.5 * Math.sin(s5));
+      }
+      case 6: {
+        var s6 = 0.5 + 0.5 * Math.sin(py * 8 + (n - 0.5) * 0.8);
+        return mix([0.52, 0.8, 0.86], [0.66, 0.9, 0.94], s6 * 0.6 + n * 0.4);
+      }
+      default: {
+        c = mix([0.12, 0.25, 0.78], [0.22, 0.42, 0.95], n);
+        return mix(c, [1, 1, 1], smooth(0.7, 0.8, detail) * 0.35);
+      }
+    }
+  }
+
+  function makePlanetTexture(idx) {
+    var W = 256, H = 128;
+    var cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    var ctx = cv.getContext("2d");
+    var img = ctx.createImageData(W, H);
+    for (var y = 0; y < H; y++) {
+      var lat = (0.5 - (y + 0.5) / H) * Math.PI;      // top row is the north pole
+      var sy = Math.sin(lat), cy = Math.cos(lat);
+      for (var x = 0; x < W; x++) {
+        var lon = (x + 0.5) / W * Math.PI * 2;
+        var c = planetPixel(idx, cy * Math.cos(lon), sy, cy * Math.sin(lon));
+        var o = (y * W + x) * 4;
+        img.data[o] = Math.round(clamp01(c[0]) * 255);
+        img.data[o + 1] = Math.round(clamp01(c[1]) * 255);
+        img.data[o + 2] = Math.round(clamp01(c[2]) * 255);
+        img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    var tex = new THREE.CanvasTexture(cv);
+    tex.encoding = THREE.sRGBEncoding;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    return tex;
+  }
+
+  // ------------------------------------------------------------ build the cradle
+  var cradle = new THREE.Group();
+  scene.add(cradle);
+
+  var metal = new THREE.MeshStandardMaterial({ color: 0x2c3140, metalness: 0.55, roughness: 0.45 });
+  var thread = new THREE.MeshStandardMaterial({ color: 0xbfc6d8, metalness: 0.3, roughness: 0.5 });
+  var unitBox = new THREE.BoxGeometry(1, 1, 1);
+  var unitCyl = new THREE.CylinderGeometry(1, 1, 2, 8);   // 2 units tall, radius 1
+  var ballGeo = new THREE.SphereGeometry(BALL_R, 48, 32);
+
+  function box(pos, scale) {
+    var m = new THREE.Mesh(unitBox, metal);
+    m.position.copy(pos); m.scale.copy(scale);
+    cradle.add(m);
+    return m;
+  }
+
+  var hw = (PLANETS - 1) * spacing * 0.5 + BALL_R * 2;
+  for (var sz = -1; sz <= 1; sz += 2) {
+    box(new THREE.Vector3(0, pivotY, sz * FRAME_DEPTH), new THREE.Vector3(2 * hw + 0.12, 0.12, 0.12));
+    for (var sx = -1; sx <= 1; sx += 2)
+      box(new THREE.Vector3(sx * hw, pivotY * 0.5, sz * FRAME_DEPTH), new THREE.Vector3(0.12, pivotY, 0.12));
+  }
+  box(new THREE.Vector3(0, -0.15, 0), new THREE.Vector3(2 * hw + 1, 0.3, 2 * FRAME_DEPTH + 1));
+
+  var th = new Array(PLANETS), om = new Array(PLANETS), lastHit = new Array(PLANETS);
+  var balls = [], strings = [];
+  for (var i = 0; i < PLANETS; i++) {
+    th[i] = 0; om[i] = 0; lastHit[i] = -10;
+    var pm = new THREE.MeshStandardMaterial({
+      map: makePlanetTexture(i), roughness: i === 2 ? 0.5 : 0.8, metalness: 0
+    });
+    var b = new THREE.Mesh(ballGeo, pm);
+    b.name = NAMES[i];
+    b.userData.index = i;
+    cradle.add(b);
+    balls.push(b);
+    var pair = [];
+    for (var s = 0; s < 2; s++) {
+      var st = new THREE.Mesh(unitCyl, thread);
+      cradle.add(st);
+      pair.push(st);
+    }
+    strings.push(pair);
+  }
+
+  // Saturn's ring
+  var ring = new THREE.Mesh(
+    new THREE.RingGeometry(BALL_R * 1.15, BALL_R * 1.45, 96),
+    new THREE.MeshStandardMaterial({ color: 0xd9bf8c, roughness: 0.9, side: THREE.DoubleSide, transparent: true, opacity: 0.92 })
+  );
+  ring.rotation.x = Math.PI / 2;
+  var ringHolder = new THREE.Group();
+  ringHolder.rotation.z = 35 * Math.PI / 180;
+  ringHolder.add(ring);
+  cradle.add(ringHolder);
+
+  function pivotX(i) { return (i - (PLANETS - 1) * 0.5) * spacing; }
+  function ballPos(i, out) {
+    return out.set(pivotX(i) + STRING_LEN * Math.sin(th[i]), pivotY - STRING_LEN * Math.cos(th[i]), 0);
+  }
+
+  var tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), tmpC = new THREE.Vector3();
+  var yAxis = new THREE.Vector3(0, 1, 0);
+  function placeString(mesh, a, b) {
+    tmpC.subVectors(b, a);
+    var len = tmpC.length();
+    if (len < 1e-5) return;
+    mesh.position.addVectors(a, b).multiplyScalar(0.5);
+    mesh.quaternion.setFromUnitVectors(yAxis, tmpC.multiplyScalar(1 / len));
+    mesh.scale.set(0.03, len * 0.5, 0.03);
+  }
+
+  var spin = 0;
+  function apply() {
+    for (var i = 0; i < PLANETS; i++) {
+      ballPos(i, tmpA);
+      balls[i].position.copy(tmpA);
+      balls[i].rotation.y = spin * (0.5 + 0.12 * i);
+      placeString(strings[i][0], tmpB.set(pivotX(i), pivotY, -FRAME_DEPTH), tmpA);
+      placeString(strings[i][1], tmpB.set(pivotX(i), pivotY, FRAME_DEPTH), tmpA);
+    }
+    ringHolder.position.copy(balls[5].position);
+  }
+
+  // ------------------------------------------------------------ space backdrop
+  (function backdrop() {
+    var n = 700, pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
+    var cA = new THREE.Color(0.7, 0.8, 1), cB = new THREE.Color(1, 0.95, 0.8), c = new THREE.Color();
+    for (var i = 0; i < n; i++) {
+      var v = new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1);
+      if (v.lengthSq() < 0.0001) v.set(1, 0, 0);
+      v.normalize().multiplyScalar(95).add(target);
+      pos[i * 3] = v.x; pos[i * 3 + 1] = v.y; pos[i * 3 + 2] = v.z;
+      c.copy(cA).lerp(cB, Math.random()).multiplyScalar(0.4 + Math.random() * 0.6);
+      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    var m = new THREE.PointsMaterial({
+      size: 1.6 * renderer.getPixelRatio(), sizeAttenuation: false, vertexColors: true,
+      transparent: true, opacity: 0.95, depthWrite: false
+    });
+    scene.add(new THREE.Points(g, m));
+
+    function glow(inner, outer) {
+      var cv = document.createElement("canvas"); cv.width = cv.height = 128;
+      var x = cv.getContext("2d");
+      var gr = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+      gr.addColorStop(0, inner); gr.addColorStop(0.35, outer); gr.addColorStop(1, "rgba(0,0,0,0)");
+      x.fillStyle = gr; x.fillRect(0, 0, 128, 128);
+      return new THREE.CanvasTexture(cv);
+    }
+    var sunPos = target.clone().add(new THREE.Vector3(-34, 18, -62));
+    var halo = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glow("rgba(255,170,70,0.55)", "rgba(255,120,30,0.22)"), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true
+    }));
+    halo.scale.set(80, 80, 1); halo.position.copy(sunPos); scene.add(halo);
+    var core = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glow("rgba(255,250,225,1)", "rgba(255,200,120,0.7)"), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true
+    }));
+    core.scale.set(20, 20, 1); core.position.copy(sunPos); scene.add(core);
+  })();
+
+  // ------------------------------------------------------------ explosion particles
+  var MAXP = 2600;
+  var pPos = new Float32Array(MAXP * 3), pCol = new Float32Array(MAXP * 4), pSize = new Float32Array(MAXP);
+  var pVel = new Float32Array(MAXP * 3), pAge = new Float32Array(MAXP), pLife = new Float32Array(MAXP);
+  var pStart = new Float32Array(MAXP * 3), pSize0 = new Float32Array(MAXP), pFire = new Uint8Array(MAXP);
+  for (var q = 0; q < MAXP; q++) { pAge[q] = 1; pLife[q] = 1; }
+  var pNext = 0;
+
+  var pGeo = new THREE.BufferGeometry();
+  pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
+  pGeo.setAttribute("aColor", new THREE.BufferAttribute(pCol, 4));
+  pGeo.setAttribute("aSize", new THREE.BufferAttribute(pSize, 1));
+  var pMat = new THREE.ShaderMaterial({
+    uniforms: { uScale: { value: 800 } },
+    vertexShader:
+      "attribute vec4 aColor; attribute float aSize; uniform float uScale; varying vec4 vColor;" +
+      "void main(){ vColor = aColor; vec4 mv = modelViewMatrix * vec4(position,1.0);" +
+      "gl_PointSize = aSize * uScale / max(0.1, -mv.z); gl_Position = projectionMatrix * mv; }",
+    fragmentShader:
+      "varying vec4 vColor; void main(){ vec2 d = gl_PointCoord * 2.0 - 1.0; float r = length(d);" +
+      "float a = clamp(1.0 - r, 0.0, 1.0); a = a * a * (3.0 - 2.0 * a);" +
+      "gl_FragColor = vec4(vColor.rgb * vColor.a * a, 1.0); }",
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending
+  });
+  var points = new THREE.Points(pGeo, pMat);
+  points.frustumCulled = false;
+  scene.add(points);
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function spawnBurst(pos, count, sMin, sMax, zMin, zMax, c1, c2, lMin, lMax, fire) {
+    for (var n = 0; n < count; n++) {
+      var i = pNext; pNext = (pNext + 1) % MAXP;
+      // random point inside a small sphere, pushed outward
+      var dx, dy, dz;
+      do { dx = Math.random() * 2 - 1; dy = Math.random() * 2 - 1; dz = Math.random() * 2 - 1; } while (dx * dx + dy * dy + dz * dz > 1);
+      var len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      var speed = rand(sMin, sMax);
+      pPos[i * 3] = pos.x + dx * 0.15;
+      pPos[i * 3 + 1] = pos.y + dy * 0.15;
+      pPos[i * 3 + 2] = pos.z + dz * 0.15;
+      pVel[i * 3] = dx / len * speed; pVel[i * 3 + 1] = dy / len * speed; pVel[i * 3 + 2] = dz / len * speed;
+      var t = Math.random();
+      pStart[i * 3] = lerp(c1[0], c2[0], t);
+      pStart[i * 3 + 1] = lerp(c1[1], c2[1], t);
+      pStart[i * 3 + 2] = lerp(c1[2], c2[2], t);
+      pCol[i * 4] = pStart[i * 3]; pCol[i * 4 + 1] = pStart[i * 3 + 1]; pCol[i * 4 + 2] = pStart[i * 3 + 2];
+      pCol[i * 4 + 3] = 1;
+      pSize0[i] = rand(zMin, zMax);
+      pAge[i] = 0; pLife[i] = rand(lMin, lMax); pFire[i] = fire ? 1 : 0;
+    }
+  }
+
+  function updateParticles(dt) {
+    var drag = Math.exp(-1.1 * dt);
+    for (var i = 0; i < MAXP; i++) {
+      if (pAge[i] >= pLife[i]) { pCol[i * 4 + 3] = 0; pSize[i] = 0; continue; }
+      pAge[i] += dt;
+      var t = pAge[i] / pLife[i];
+      if (t >= 1) { pCol[i * 4 + 3] = 0; pSize[i] = 0; continue; }
+      pVel[i * 3] *= drag; pVel[i * 3 + 1] *= drag; pVel[i * 3 + 2] *= drag;
+      pPos[i * 3] += pVel[i * 3] * dt; pPos[i * 3 + 1] += pVel[i * 3 + 1] * dt; pPos[i * 3 + 2] += pVel[i * 3 + 2] * dt;
+      var r, g, b, a;
+      if (pFire[i]) {
+        // white -> orange -> dark red, alpha 1 -> .7 -> 0, multiplied by the start colour
+        var gr, gg, gb;
+        if (t < 0.35) { var u = t / 0.35; gr = lerp(1, 1, u); gg = lerp(1, 0.55, u); gb = lerp(1, 0.2, u); }
+        else { var v = (t - 0.35) / 0.65; gr = lerp(1, 0.35, v); gg = lerp(0.55, 0.08, v); gb = lerp(0.2, 0.05, v); }
+        a = t < 0.5 ? lerp(1, 0.7, t / 0.5) : lerp(0.7, 0, (t - 0.5) / 0.5);
+        r = pStart[i * 3] * gr; g = pStart[i * 3 + 1] * gg; b = pStart[i * 3 + 2] * gb;
+      } else {
+        a = t < 0.6 ? 1 : lerp(1, 0, (t - 0.6) / 0.4);
+        r = pStart[i * 3]; g = pStart[i * 3 + 1]; b = pStart[i * 3 + 2];
+      }
+      pCol[i * 4] = r; pCol[i * 4 + 1] = g; pCol[i * 4 + 2] = b; pCol[i * 4 + 3] = a;
+      var sc = t < 0.2 ? lerp(0.5, 1, t / 0.2) : lerp(1, 0, (t - 0.2) / 0.8);
+      pSize[i] = pSize0[i] * sc;
+    }
+    pGeo.attributes.position.needsUpdate = true;
+    pGeo.attributes.aColor.needsUpdate = true;
+    pGeo.attributes.aSize.needsUpdate = true;
+  }
+
+  // ------------------------------------------------------------ sound
+  var audioCtx = null, boomBuf = null, soundOn = true;
+  function ensureAudio() {
+    if (audioCtx) { if (audioCtx.state === "suspended") audioCtx.resume(); return; }
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try {
+      audioCtx = new AC();
+      var rate = audioCtx.sampleRate, len = Math.floor(rate * 1.5);
+      boomBuf = audioCtx.createBuffer(1, len, rate);
+      var d = boomBuf.getChannelData(0), lp = 0;
+      for (var i = 0; i < len; i++) {
+        var t = i / rate;
+        var env = Math.exp(-t * 3.2) * Math.min(1, t * 400);
+        var noise = Math.random() * 2 - 1;
+        lp += (noise - lp) * lerp(0.5, 0.03, Math.min(1, t * 2.5));
+        var tone = Math.sin(2 * Math.PI * (90 * t - 20 * t * t));
+        d[i] = Math.max(-1, Math.min(1, (lp * 1.6 + tone * 0.7) * env));
+      }
+    } catch (e) { audioCtx = null; }
+  }
+  function playBoom(vol) {
+    if (!soundOn || !audioCtx || !boomBuf || audioCtx.state !== "running") return;
+    var src = audioCtx.createBufferSource(), gain = audioCtx.createGain();
+    src.buffer = boomBuf;
+    src.playbackRate.value = rand(0.85, 1.1);
+    gain.gain.value = Math.max(0.15, Math.min(1, vol));
+    src.connect(gain); gain.connect(audioCtx.destination);
+    src.start();
+  }
+
+  // ------------------------------------------------------------ explosions
+  var simTime = 0, lastBoom = -10;
+  var impactEl = document.getElementById("impact");
+  var impactCount = 0;
+
+  function explode(i, rel) {
+    ballPos(i, tmpA); ballPos(i + 1, tmpB);
+    var pos = new THREE.Vector3().addVectors(tmpA, tmpB).multiplyScalar(0.5);
+    var power = Math.max(0.4, Math.min(2, rel / 6)) * EXPLOSION_SIZE;
+    var big = simTime - lastBoom > HIT_COOLDOWN;
+    if (big) lastBoom = simTime;
+    var p = big ? power : power * 0.4;
+    var ca = TINT[i % 8], cb = TINT[(i + 1) % 8];
+
+    var fireCount = big ? 70 + Math.floor(40 * p) : 18 + Math.floor(20 * p);
+    spawnBurst(pos, fireCount, 1.5 * p, 6.5 * p, 0.5 * p + 0.2, 1.5 * p + 0.3, [1, 0.55, 0.1], [1, 0.92, 0.55], 0.4, 0.9, true);
+    spawnBurst(pos, big ? 40 : 10, 1.5 * p, 6 * p, 0.1, 0.28, ca, cb, 0.9, 1.9, false);
+    if (!big) return;
+
+    spawnBurst(pos, 1, 0, 0, 3 * p + 1, 3 * p + 1.5, [1, 0.9, 0.7], [1, 1, 1], 0.25, 0.3, true);
+
+    tmpC.copy(camera.position).sub(pos).normalize().multiplyScalar(1.2).add(pos);
+    flashLight.position.copy(tmpC);
+    flashPower = 10 * p;
+    playBoom(0.45 * p);
+    shake = Math.max(shake, CAMERA_SHAKE * p);
+
+    impactCount++;
+    impactEl.innerHTML = NAMES[i % 8] + " × " + NAMES[(i + 1) % 8] + " &nbsp;<b>" + (rel).toFixed(1) + " u/s</b> &nbsp;#" + impactCount;
+  }
+
+  // ------------------------------------------------------------ physics (ported from the Unity script)
+  var heldFrom = -1, heldTo = -1, dragIndex = -1, acc = 0;
+  function isHeld(i) { return i >= heldFrom && i <= heldTo; }
+  function shift(j, dx) { th[j] = Math.asin(Math.max(-1, Math.min(1, Math.sin(th[j]) + dx / STRING_LEN))); }
+
+  function simulate() {
+    simTime += STEP;
+    var i;
+    for (i = 0; i < PLANETS; i++) {
+      if (isHeld(i)) continue;
+      om[i] += (-k * Math.sin(th[i]) - DAMPING * om[i]) * STEP;
+      th[i] += om[i] * STEP;
+    }
+    for (var pass = 0; pass < 40; pass++) {
+      var hit = false;
+      for (i = 0; i < PLANETS - 1; i++) {
+        var a = isHeld(i), b = isHeld(i + 1);
+        if (a && b) continue;
+        var overlap = -(STRING_LEN * (Math.sin(th[i + 1]) - Math.sin(th[i])));
+        if (overlap <= 1e-7) continue;
+        hit = true;
+        var vi = om[i] * Math.cos(th[i]), vj = om[i + 1] * Math.cos(th[i + 1]);
+        if (vi - vj > 0) {
+          var rel = (vi - vj) * STRING_LEN;
+          if (rel > MIN_IMPACT && simTime - lastHit[i] > HIT_COOLDOWN) {
+            lastHit[i] = simTime;
+            explode(i, rel);
+          }
+          var t = om[i];
+          om[i] = om[i + 1] * RESTITUTION;
+          om[i + 1] = t * RESTITUTION;
+        }
+        if (a) shift(i + 1, overlap);
+        else if (b) shift(i, -overlap);
+        else { shift(i, -overlap * 0.5); shift(i + 1, overlap * 0.5); }
+      }
+      if (!hit) break;
+    }
+    for (i = 0; i < PLANETS; i++) {
+      if (isHeld(i)) { om[i] = 0; continue; }
+      if (Math.abs(om[i]) < 1e-4 && Math.abs(th[i]) < 1e-5) { om[i] = 0; th[i] = 0; }
+    }
+  }
+
+  function release() { dragIndex = -1; heldFrom = heldTo = -1; canvas.classList.remove("dragging"); }
+  function lift(n) {
+    release();
+    for (var i = 0; i < PLANETS; i++) { th[i] = 0; om[i] = 0; }
+    for (var j = 0; j < Math.min(n, PLANETS); j++) th[j] = -START_ANGLE;
+  }
+
+  // ------------------------------------------------------------ input
+  var pointer = new THREE.Vector2(), raycaster = new THREE.Raycaster();
+  var swingPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  var activePointer = null;
+
+  function setPointer(e) {
+    var r = canvas.getBoundingClientRect();
+    pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  }
+  function tryGrab() {
+    raycaster.setFromCamera(pointer, camera);
+    var hits = raycaster.intersectObjects(balls, false);
+    if (!hits.length) return false;
+    dragIndex = hits[0].object.userData.index;
+    heldFrom = heldTo = dragIndex;
+    canvas.classList.add("dragging");
+    return true;
+  }
+  function drag() {
+    raycaster.setFromCamera(pointer, camera);
+    var p = new THREE.Vector3();
+    if (!raycaster.ray.intersectPlane(swingPlane, p)) return;
+    var a = Math.atan2(p.x - pivotX(dragIndex), pivotY - p.y);
+    a = Math.max(-MAX_DRAG, Math.min(MAX_DRAG, a));
+    if (a < 0) { heldFrom = 0; heldTo = dragIndex; }
+    else { heldFrom = dragIndex; heldTo = PLANETS - 1; }
+    for (var i = heldFrom; i <= heldTo; i++) { th[i] = a; om[i] = 0; }
+  }
+
+  canvas.addEventListener("pointerdown", function (e) {
+    ensureAudio();
+    if (activePointer !== null) return;
+    setPointer(e);
+    if (tryGrab()) {
+      activePointer = e.pointerId;
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+    }
+  });
+  canvas.addEventListener("pointermove", function (e) {
+    if (e.pointerId === activePointer) setPointer(e);
+  });
+  function endPointer(e) {
+    if (e.pointerId !== activePointer) return;
+    activePointer = null;
+    release();
+  }
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
+
+  window.addEventListener("keydown", function (e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    ensureAudio();
+    if (e.key >= "1" && e.key <= "4") lift(parseInt(e.key, 10));
+    else if (e.key === "r" || e.key === "R") lift(START_LIFTED);
+  });
+
+  document.querySelectorAll("[data-lift]").forEach(function (btn) {
+    btn.addEventListener("click", function () { ensureAudio(); lift(parseInt(btn.getAttribute("data-lift"), 10)); });
+  });
+  document.getElementById("reset").addEventListener("click", function () { ensureAudio(); lift(START_LIFTED); });
+  var soundBtn = document.getElementById("sound");
+  soundBtn.addEventListener("click", function () {
+    ensureAudio();
+    soundOn = !soundOn;
+    soundBtn.setAttribute("aria-pressed", String(soundOn));
+    soundBtn.textContent = soundOn ? "Sound on" : "Sound off";
+  });
+
+  // ------------------------------------------------------------ camera + resize
+  function fitCamera() {
+    var w = stage.clientWidth || window.innerWidth, h = stage.clientHeight || window.innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    var tanHalf = Math.tan(FOV * Math.PI / 360);
+    var needW = 6.4 / (tanHalf * camera.aspect);          // frame is about 9 units wide
+    var needH = 4.6 / tanHalf;                            // and about 5 tall, with room for the HUD
+    var dist = Math.max(14, needW, needH);
+    camBase.copy(target).addScaledVector(camDir, dist);
+    camera.position.copy(camBase);
+    camera.lookAt(target);
+    pMat.uniforms.uScale.value = renderer.domElement.height / (2 * tanHalf);
+  }
+  window.addEventListener("resize", fitCamera);
+
+  // ------------------------------------------------------------ main loop
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduceMotion) { CAMERA_SHAKE = 0; }
+
+  lift(START_LIFTED);
+  fitCamera();
+  apply();
+
+  var last = performance.now();
+  function frame(now) {
+    var dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+
+    if (dragIndex >= 0) drag();
+    acc += dt;
+    while (acc >= STEP) { simulate(); acc -= STEP; }
+    spin += dt * 25 * Math.PI / 180;
+    apply();
+    updateParticles(dt);
+
+    flashPower *= Math.exp(-10 * dt);
+    if (flashPower < 0.01) flashPower = 0;
+    flashLight.intensity = flashPower;
+
+    shake *= Math.exp(-9 * dt);
+    if (shake > 0.002) {
+      shakeOffset.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).multiplyScalar(shake);
+      camera.position.copy(camBase).add(shakeOffset);
+    } else {
+      camera.position.copy(camBase);
+    }
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
